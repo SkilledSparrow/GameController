@@ -48,21 +48,21 @@ struct ContentView: View {
                             HStack(spacing: 20) {
                                 ControllerButton(
                                     label: "L1",
-                                    action: { networkManager.sendButtonPress("L1") }
+                                    networkManager: networkManager
                                 )
                                 ControllerButton(
                                     label: "L2",
-                                    action: { networkManager.sendButtonPress("L2") }
+                                    networkManager: networkManager
                                 )
                             }
                             HStack(spacing: 20) {
                                 ControllerButton(
                                     label: "L3",
-                                    action: { networkManager.sendButtonPress("L3") }
+                                    networkManager: networkManager
                                 )
                                 ControllerButton(
                                     label: "L4",
-                                    action: { networkManager.sendButtonPress("L4") }
+                                    networkManager: networkManager
                                 )
                             }
                         }
@@ -74,21 +74,21 @@ struct ContentView: View {
                             HStack(spacing: 20) {
                                 ControllerButton(
                                     label: "R1",
-                                    action: { networkManager.sendButtonPress("R1") }
+                                    networkManager: networkManager
                                 )
                                 ControllerButton(
                                     label: "R2",
-                                    action: { networkManager.sendButtonPress("R2") }
+                                    networkManager: networkManager
                                 )
                             }
                             HStack(spacing: 20) {
                                 ControllerButton(
                                     label: "R3",
-                                    action: { networkManager.sendButtonPress("R3") }
+                                    networkManager: networkManager
                                 )
                                 ControllerButton(
                                     label: "R4",
-                                    action: { networkManager.sendButtonPress("R4") }
+                                    networkManager: networkManager
                                 )
                             }
                         }
@@ -145,20 +145,14 @@ struct ContentView: View {
 
 struct ControllerButton: View {
     let label: String
-    let action: () -> Void
+    let networkManager: NetworkManager
     @State private var isPressed = false
+    @State private var longPressTimer: Timer?
+    @State private var repeatTimer: Timer?
     
     var body: some View {
         Button(action: {
-            withAnimation(.easeInOut(duration: 0.1)) {
-                isPressed = true
-            }
-            action()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                withAnimation(.easeInOut(duration: 0.1)) {
-                    isPressed = false
-                }
-            }
+            // Single tap action - handled by tap gesture
         }) {
             Text(label)
                 .font(.headline)
@@ -172,15 +166,78 @@ struct ControllerButton: View {
                 .scaleEffect(isPressed ? 0.95 : 1.0)
         }
         .buttonStyle(PlainButtonStyle())
+        .onTapGesture {
+            // Handle single tap
+            handleSingleTap()
+        }
+        .onLongPressGesture(minimumDuration: 0, maximumDistance: .infinity, pressing: { pressing in
+            if pressing {
+                handlePressStart()
+            } else {
+                handlePressEnd()
+            }
+        }, perform: {
+            // This will be called after the minimum duration, but we handle everything in the pressing callback
+        })
+    }
+    
+    private func handleSingleTap() {
+        guard !isPressed else { return } // Prevent tap during long press
+        
+        withAnimation(.easeInOut(duration: 0.1)) {
+            isPressed = true
+        }
+        
+        networkManager.sendButtonPress(label)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            withAnimation(.easeInOut(duration: 0.1)) {
+                isPressed = false
+            }
+        }
+    }
+    
+    private func handlePressStart() {
+        withAnimation(.easeInOut(duration: 0.1)) {
+            isPressed = true
+        }
+        
+        // Send initial button press
+        networkManager.sendButtonPress(label)
+        
+        // Start long press timer (wait 0.5 seconds before starting repetition)
+        longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
+            startRepeating()
+        }
+    }
+    
+    private func handlePressEnd() {
+        withAnimation(.easeInOut(duration: 0.1)) {
+            isPressed = false
+        }
+        
+        // Cancel timers
+        longPressTimer?.invalidate()
+        longPressTimer = nil
+        repeatTimer?.invalidate()
+        repeatTimer = nil
+    }
+    
+    private func startRepeating() {
+        // Start repeating at 20 times per second (50ms interval) for maximum responsiveness
+        repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            networkManager.sendButtonPress(label)
+        }
     }
 }
 
 class NetworkManager: ObservableObject {
     @Published var isConnected = false
     @Published var connectionStatus = "Disconnected"
-    @Published var macIPAddress = "192.168.1.100" // Make this editable
+    @Published var macIPAddress = "192.168.1.100"
     private var connection: NWConnection?
     private let port: NWEndpoint.Port = 12345
+    private var sendQueue = DispatchQueue(label: "sendQueue", qos: .userInitiated)
     
     func connectToMac() {
         // Disconnect any existing connection first
@@ -241,16 +298,18 @@ class NetworkManager: ObservableObject {
     func sendButtonPress(_ button: String) {
         guard let connection = connection, isConnected else { return }
         
-        let message = button
-        let data = message.data(using: .utf8)!
-        
-        connection.send(content: data, completion: .contentProcessed { error in
-            if let error = error {
-                print("Send error: \(error)")
-            } else {
-                print("Sent button press: \(button)")
-            }
-        })
+        sendQueue.async {
+            let message = button
+            let data = message.data(using: .utf8)!
+            
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error = error {
+                    print("Send error: \(error)")
+                } else {
+                    print("Sent button press: \(button)")
+                }
+            })
+        }
     }
 }
 
