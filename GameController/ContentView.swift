@@ -238,16 +238,17 @@ class NetworkManager: ObservableObject {
     private var connection: NWConnection?
     private let port: NWEndpoint.Port = 12345
     private var sendQueue = DispatchQueue(label: "sendQueue", qos: .userInitiated)
+    private var heartbeatTimer: Timer?
     
     func connectToMac() {
         // Disconnect any existing connection first
         disconnect()
         
-        print("🔄 Attempting to connect to Mac at \(macIPAddress):12345")
+        print("🔄 Attempting to connect to Mac at \(macIPAddress):12345 via UDP")
         connectionStatus = "Connecting..."
         
         let host = NWEndpoint.Host(macIPAddress)
-        connection = NWConnection(host: host, port: port, using: .tcp)
+        connection = NWConnection(host: host, port: port, using: .udp)
         
         connection?.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
@@ -255,7 +256,8 @@ class NetworkManager: ObservableObject {
                 case .ready:
                     self?.isConnected = true
                     self?.connectionStatus = "Connected"
-                    print("✅ Successfully connected to Mac!")
+                    print("✅ Successfully connected to Mac via UDP!")
+                    self?.startHeartbeat()
                 case .preparing:
                     self?.connectionStatus = "Preparing..."
                     print("🔄 Preparing connection...")
@@ -267,10 +269,12 @@ class NetworkManager: ObservableObject {
                     print("❌ Connection failed: \(error.localizedDescription)")
                     self?.isConnected = false
                     self?.connection = nil
+                    self?.stopHeartbeat()
                 case .cancelled:
-                    self?.connectionStatus = "Cancelled"
+                    self?.connectionStatus = "Disconnected"
                     self?.isConnected = false
                     self?.connection = nil
+                    self?.stopHeartbeat()
                     print("🛑 Connection cancelled")
                 default:
                     print("🔄 Connection state: \(state)")
@@ -280,8 +284,8 @@ class NetworkManager: ObservableObject {
         
         connection?.start(queue: .global())
         
-        // Add a timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+        // Add a timeout for initial connection
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             if self?.connectionStatus == "Connecting..." || self?.connectionStatus.contains("Preparing") == true {
                 self?.connectionStatus = "Connection timeout - Check IP address"
                 print("⏰ Connection timeout")
@@ -290,13 +294,45 @@ class NetworkManager: ObservableObject {
     }
     
     func disconnect() {
+        stopHeartbeat()
         connection?.cancel()
         connection = nil
         isConnected = false
+        connectionStatus = "Disconnected"
+    }
+    
+    private func startHeartbeat() {
+        // Send periodic heartbeat to maintain connection status
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.sendHeartbeat()
+        }
+    }
+    
+    private func stopHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+    }
+    
+    private func sendHeartbeat() {
+        guard let connection = connection, isConnected else { return }
+        
+        let heartbeatData = "HEARTBEAT".data(using: .utf8)!
+        connection.send(content: heartbeatData, completion: .contentProcessed { [weak self] error in
+            if let error = error {
+                print("❌ Heartbeat failed: \(error)")
+                DispatchQueue.main.async {
+                    self?.connectionStatus = "Connection Lost"
+                    self?.isConnected = false
+                }
+            }
+        })
     }
     
     func sendButtonPress(_ button: String) {
-        guard let connection = connection, isConnected else { return }
+        guard let connection = connection, isConnected else {
+            print("⚠️ Cannot send button press - not connected")
+            return
+        }
         
         sendQueue.async {
             let message = button
@@ -304,9 +340,13 @@ class NetworkManager: ObservableObject {
             
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
-                    print("Send error: \(error)")
+                    print("❌ Send error: \(error)")
+                    DispatchQueue.main.async {
+                        // Don't immediately disconnect on send errors with UDP
+                        // as packets can be lost occasionally
+                    }
                 } else {
-                    print("Sent button press: \(button)")
+                    print("📤 Sent button press: \(button)")
                 }
             })
         }
